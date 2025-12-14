@@ -35,12 +35,28 @@ $config = Import-PowerShellDataFile -Path ".\config.psd1"
 
 [string]$PS2_DEVICE = Get-RequiredConfigValue -Config $config -Key "Ps2Device"
 [string]$OPL_PARTITION = Get-RequiredConfigValue -Config $config -Key "OplPartition"
+# @TODO Unused
 [string]$COMMON_PARTITION = Get-RequiredConfigValue -Config $config -Key "CommonPartition"
 [string]$POPS_PARTITION = Get-RequiredConfigValue -Config $config -Key "PopsPartition"
 [string]$ART_ZIP_PATH = Get-OptionalConfigValue -Config $config -Key "ArtZipPath" -DefaultValue ""
+[boolean]$ART_ZIP_EXISTS = $ART_ZIP_PATH -ne ""
+if ($ART_ZIP_EXISTS -and -not (Test-Path $ART_ZIP_PATH)) {
+    throw "ART ZIP path specified does not exist: '$ART_ZIP_PATH'"
+}
+[string[]]$ART_FILE_TYPES = @(
+    "COV",
+    "COV2",
+    "ICO",
+    "LGO",
+    "LAB",
+    "SCR",
+    "BG"
+)
 
 [string]$PFSSHELL_PATH = "lib\pfsshell\pfsshell.exe"
+[string]$POPSTARTER_PATH = "lib\popstarter\POPSTARTER.ELF"
 [string]$COPY_ROOT = "__copy"
+[string]$TEMP_ROOT = "__temp"
 [string]$COPY_PLACEHOLDER_FILE_NAME = "place-files-to-copy-here"
 
 # ============================================================================
@@ -68,8 +84,6 @@ function Get-ZipPaths {
 
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
-
-    Write-Host "[Zip] Reading: ${Prefixes}"
 
     try {
         $entries = $zip.Entries |
@@ -123,6 +137,8 @@ function Copy-ToPfsRecursive {
         [string]$SourcePath,      # Local folder to copy, e.g. "D:\PS2 BKP\APPS"
         [string]$DestPath         # Destination path on PS2, e.g. "APPS" (relative to mount root)
     )
+
+    Write-Host "Copying directory '$SourcePath' to PFS '${Partition}:${DestPath}'..."
 
     $commands = @()
 
@@ -235,17 +251,56 @@ function Get-PfsPartitionNames {
     return $parsedLines
 }
 
+function Get-RandomArtPath {
+    param(
+        [string[]]$ArtPaths,
+        [string]$TitleId,
+        [string]$ArtType,
+        [int]$Count = 1
+    )
+
+    # Filter art paths to only those matching TitleId and ArtType
+    $paths_of_type_for_title = @($ArtPaths | Where-Object { $_ -like "*/${TitleId}_${ArtType}.*" -or $_ -like "*/${TitleId}_${ArtType}_*" })
+
+    $result = @()
+    for ($i = 0; $i -lt $Count; $i++) {
+        if ($paths_of_type_for_title.Count -eq 0) {
+            break
+        }
+
+        # Pick a random index
+        $randomIndex = Get-Random -Minimum 0 -Maximum $paths_of_type_for_title.Count
+        $selectedPath = $paths_of_type_for_title[$randomIndex]
+
+        # Add to result
+        $result += $selectedPath
+
+        # Remove selected path from available paths
+        $paths_of_type_for_title = @($paths_of_type_for_title | Where-Object { $_ -ne $selectedPath })
+    }
+
+    return $result
+}
+
 
 # ============================================================================
 # Main
 # ============================================================================
 
+# Proactively clean up any old temp files (e.g. if previous run crashed)
+if (Test-Path $TEMP_ROOT) {
+    Remove-Item -Path $TEMP_ROOT -Recurse -Force
+}
+
 # === Phase 0 - Copy any source files
+Write-Host "Copying source files to HDD..."
 # PSX .VCD files
 Copy-ToPfsRecursive -Partition $POPS_PARTITION -SourcePath "$COPY_ROOT\POPS" -DestPath "/"
 
 # === Phase 0.1 - Read in HDD state
+Write-Host "Reading HDD state..."
 # Read all .VCD files
+Write-Host "Scanning for PSX .VCD files..."
 $all_psx_data = Get-PfsFilePaths -Partition $POPS_PARTITION -Path "/" | ForEach-Object {
     if ($_ -like "*.VCD") {
         # `$_` looks like `SCES_015.64.Ape Escape.VCD`
@@ -268,20 +323,25 @@ $all_psx_data = Get-PfsFilePaths -Partition $POPS_PARTITION -Path "/" | ForEach-
             Write-Host "Skipping unrecognised file name format: '$fileName'"
             return
         }
-        #
+
+        # Write-Host "  [DEBUG] Found PSX game: $titleId ($gameName)"
         [PSCustomObject]@{
             FileName = $fileName
             GameName = $gameName
-            TitleId = $titleId
+            TitleId  = $titleId
         }
     }
 }
+Write-Host "Found $($all_psx_data.Count) PSX games"
 # Read all existing app config directories
-$existing_opl_apps = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/APPS"
+Write-Host "Reading existing APPS folders..."
+[string[]]$existing_opl_apps = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/APPS"
 # Read all existing art files
-$existing_art_files = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/ART"
+Write-Host "Reading existing ART files..."
+[string[]]$existing_art_files = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/ART"
 # Read all HDD partition names (for PS2 games)
-$all_partition_names = Get-PfsPartitionNames
+Write-Host "Scanning for PS2 game partitions..."
+[string[]]$all_partition_names = Get-PfsPartitionNames
 $all_ps2_data = $all_partition_names | Where-Object { $_ -like "PP.*" } | ForEach-Object {
     # e.g. PP.SLUS-20685..APE_ESCAPE_2
     # Trim possible trailing * (which shows in pfsshell output)
@@ -293,108 +353,142 @@ $all_ps2_data = $all_partition_names | Where-Object { $_ -like "PP.*" } | ForEac
     $parts = $trimmed -split '\.\.'         # Split into `SLUS-20685` and `APE_ESCAPE_2*`
     $titleIdParts = $parts[0] -split '-'     # Split title ID into `SLUS` and `20685`
     $titleId = $titleIdParts[0] + "_" + $titleIdParts[1].Insert(3, ".")  # e.g. `SLUS_206.85`
+    # Write-Host "  [DEBUG] Found PS2 game: $titleId ($($parts[1]))"
     [PSCustomObject]@{
         GameName = $parts[1]
-        TitleId = $titleId
+        TitleId  = $titleId
+    }
+}
+Write-Host "Found $($all_ps2_data.Count) PS2 games"
+
+# === Phase 1 - Generate missing APPS folders
+Write-Host "Generating missing APPS folders..."
+# Create temp folder
+New-Item -ItemType Directory -Path $TEMP_ROOT -Force | Out-Null
+
+foreach ($psx in $all_psx_data) {
+    # Check if any existing APPS folders start with the psx title ID
+    $matching_apps = $existing_opl_apps | Where-Object { $_ -like "$($psx.TitleId)*" }
+    if ($matching_apps.Count -eq 0) {
+        # No existing APPS folder, create one
+        $appsFolderPath = Join-Path $TEMP_ROOT "APPS\$($psx.FileName)"
+        New-Item -ItemType Directory -Path $appsFolderPath -Force | Out-Null
+
+        # Create title.cfg
+        $titleCfgPath = Join-Path $appsFolderPath "title.cfg"
+        $titleCfgContent = @"
+title=$($psx.GameName)
+boot=$($psx.FileName).ELF
+"@
+        Set-Content -Path $titleCfgPath -Value $titleCfgContent -Encoding UTF8
+
+        # Copy POPSTARTER.ELF
+        $elfDestPath = Join-Path $appsFolderPath "$($psx.FileName).ELF"
+        Copy-Item -Path $POPSTARTER_PATH -Destination $elfDestPath -Force
+
+        Write-Host "  Created APPS folder: $($psx.FileName)"
+    } else {
+        # Write-Host "  [DEBUG] APPS folder already exists for: $($psx.FileName), skipping."
     }
 }
 
-# === Phase 0.2 - Output summary of HDD state
-Write-Host ""
-Write-Host "============================================================"
-Write-Host "HDD State Summary"
-Write-Host "============================================================"
-Write-Host ""
+# === Phase 2 - (Optional) Populate ART files
+Write-Host "Populating ART files..."
+if ($ART_ZIP_EXISTS) {
+    Write-Host "Scanning ART zip file..."
+    # List all zip files in ART zip relating to all PS2 and PS1 games
+    $art_zip_prefixes = $all_ps2_data | ForEach-Object { "PS2/$($_.TitleId)/" }
+    $art_zip_prefixes += $all_psx_data | ForEach-Object { "PS1/$($_.TitleId)/" }
+    $art_zip_paths = Get-ZipPaths -ZipPath $ART_ZIP_PATH -Prefixes $art_zip_prefixes
 
-Write-Host "PS2 Games Found: $($all_ps2_data.Count)"
-foreach ($game in $all_ps2_data) {
-  Write-Host "  - $($game.TitleId) - $($game.GameName)"
+    # Collect all PS2 and PS1 game title IDs into common array
+    $all_title_ids = @()
+    $all_title_ids += $all_ps2_data | ForEach-Object { $_.TitleId }
+    $all_title_ids += $all_psx_data | ForEach-Object { $_.TitleId }
+
+    # Pick out art files from the list for each game
+    $art_to_extract = @()
+    foreach ($titleId in $all_title_ids) {
+        foreach ($artType in $ART_FILE_TYPES) {
+            # Check if this art type for this game has any existing art
+            $existing_art_of_type = $existing_art_files | Where-Object { $_ -like "${titleId}_${artType}.*" -or $_ -like "${titleId}_${artType}_*" }
+            # Only extract new files if no existing files
+            if ($existing_art_of_type.Count -eq 0) {
+                # SCR can extract up to 2 files
+                $num_arts = ($artType -eq "SCR" ? 2 : 1)
+                # Pick a random art file of type
+                $art_paths = @(Get-RandomArtPath -ArtPaths $art_zip_paths -TitleId $titleId -ArtType $artType -Count $num_arts)
+
+                # Write-Host "  [DEBUG] (${titleId}_${artType}) Matching art $($art_paths.Count) paths: $($art_paths -join ', ')"
+
+                # Collect chosen art paths (if exist in ART zip)
+                for ($i = 0; $i -lt $art_paths.Count; $i++) {
+                    $srcPath = $art_paths[$i]
+                    # Write-Host "    [DEBUG] ${titleId}_${artType}) Selected art path: $srcPath"
+                    $ext = [System.IO.Path]::GetExtension($srcPath).TrimStart('.')
+                    $destFileName = if ($i -eq 0) {
+                        # Most files are like "SCES_015.64_BG.jpg"
+                        "${titleId}_${artType}.$ext"
+                    }
+                    else {
+                        # Any art files that have more than 1 entry (i.e. just SCR)
+                        # are called "SCES_015.64_SCR2.jpg" for subsequent files
+                        "${titleId}_${artType}$($i+1).$ext"
+                    }
+
+                    # Record art zip path + proper OPL name of art file
+                    $art_to_extract += [PSCustomObject]@{
+                        Src  = $srcPath
+                        Dest = $destFileName
+                    }
+                }
+            } else {
+                # Write-Host "  [DEBUG] ART file(s) already exist for: $($titleId)_$($artType), skipping."
+            }
+        }
+    }
+
+    # Extract all art files to temp ART folder
+    Write-Host "Extracting $($art_to_extract.Count) art file(s) from zip..."
+    $tempArtPath = Join-Path $TEMP_ROOT "ART"
+    if (-not (Test-Path $tempArtPath)) {
+        New-Item -ItemType Directory -Path $tempArtPath -Force | Out-Null
+    }
+    $art_src_paths = $art_to_extract | ForEach-Object { $_.Src }
+    Expand-ZipFiles -ZipPath $ART_ZIP_PATH -Entries $art_src_paths -Destination $tempArtPath
+
+    # Rename extracted files to destination names
+    Write-Host "Renaming art files to OPL format..."
+    foreach ($art in $art_to_extract) {
+        # Determine local file name e.g. `__temp\ART\SCES_015.64_BG_00.png`
+        $srcFileName = [System.IO.Path]::GetFileName($art.Src)
+        $srcFilePath = Join-Path $tempArtPath $srcFileName
+
+        # Write-Host "  [DEBUG] Renaming '$srcFileName' to '$($art.Dest)'"
+
+        if (Test-Path $srcFilePath) {
+            Rename-Item -Path $srcFilePath -NewName $art.Dest -Force
+        }
+    }
 }
-Write-Host ""
-
-Write-Host "PSX Games Found: $($all_psx_data.Count)"
-foreach ($game in $all_psx_data) {
-  Write-Host "  - $($game.TitleId) - $($game.GameName)"
+else {
+    Write-Host "No ART ZIP specified, skipping."
 }
-Write-Host ""
 
-Write-Host "Existing OPL App Configs: $($existing_opl_apps.Count)"
-foreach ($app in $existing_opl_apps) {
-  Write-Host "  - $app"
+# === Phase 3 - Ensure PS2 games have memory card CFGs
+# @TODO
+
+# === Phase 4 - Copy temp folders to OPL partition
+Write-Host "Copying generated files to OPL partition..."
+if (Test-Path $TEMP_ROOT ) {
+    Copy-ToPfsRecursive -Partition $OPL_PARTITION -SourcePath $TEMP_ROOT -DestPath "/"
 }
-Write-Host ""
 
-Write-Host "Existing Art Files: $($existing_art_files.Count)"
-foreach ($art in $existing_art_files) {
-  Write-Host "  - $art"
+# === Cleanup
+Write-Host "Cleaning up temporary files..."
+if (Test-Path $TEMP_ROOT) {
+    Remove-Item -Path $TEMP_ROOT -Recurse -Force
 }
-Write-Host ""
 
-Write-Host "============================================================"
-Write-Host ""
-
-
-
-# # Build up the command list
-# $cmds = @()
-# $cmds += "device $PS2_DEVICE"
-# $cmds += "mount $PS2_PARTITION"
-
-# # Copy folders
-# $cmds += Copy-ToPfsRecursive -Partition $OPL_PARTITION -SourcePath "$SOURCE_ROOT\APPS" -DestPath "/APPS"
-# # $cmds += Copy-ToPfsRecursive -SourcePath "$SOURCE_ROOT\ART" -DestPath "/ART"
-# # $cmds += Get-PfsRecursiveCopyCommands -SourcePath "$SOURCE_ROOT\POPS" -DestPath "POPS"
-
-# $cmds += "umount"
-# $cmds += "exit"
-
-# # Dry run
-# Write-Output $cmds
-# # Run for real (uncomment when ready)
-# # $cmds -join "`n" | & $PFSSHELL_PATH
-
-
-
-<#
-    # One time setup
-    - Make partition called __.POPS
-    - make __common:/POPS
-    - put POPS.ELF and IOPRP252.IMG into __common:/POPS/
-
-
-    # Add games (manual steps by user)
-    - (PS2 games installed with HDL Batch or whatever)
-    - PS1 games VCDs placed in __copy/POPS
-
-    # Script logic
-    # 1. Read and validate config from build.config or something
-    #     1. PS2_DEVICE
-    #     1. OPL Partition
-    #     1. Common partition
-    #     1. POPS partition
-    #     1. ART ZIP path (optional)
-    # 1. Copy __copy/POPS to __.POPS:/ partition
-    # 1. ls __.POPS
-        # 1. For each .VCD file: extract game ID, game title, file name into an array of PS1 data
-    # 1. ls +OPL:/APPS
-    # 1. ls (no mount) -> extract all partitions called PP.* into array of PS2 data
-    # 1. ls +OPL:/ART -> store all current art file paths
-    1. For each VCD file that doesn't have an APPS folder
-        1. Create __temp/APPS/SCES.XX.YY.Game/
-        1. Create __temp/APPS/SCES.XX.YY.Game/title.cfg with title = GameTitle and boot = FileName.ELF
-        1. Create __temp/APPS/SCES.XX.YY.Game/FileName.ELF
-    1. For each PS2 datum
-        1. Store zip query prefix: `PS2/GameId`
-    1. For each PS1 datum
-        1. Store zip query prefix: `PS1/GameId`
-    1. If ARTZIP exists, query for all prefixes into list of files
-    1. For each game ID,ArtType
-        1. If any existing art paths exist with GameID, ignore game
-        1. Pick a file from the list, store it in an array with src/destination
-        1. src = path in zip file
-        1. dest = renamed output e.g. SLUS-20685_BG.png
-    1. Collect all `.src` and extract files from ARTZIP to __temp/ART
-    1. Iterate src/dest array of art files and use basename of `src` as param to rename to `dest`
-    1. Copy _temp/ to +OPL:/
-#>
+Write-Host "Done!"
 

@@ -291,7 +291,7 @@ $all_ps2_data = $all_partition_names | Where-Object { $_ -like "PP.*" } | ForEac
     # e.g. `PP.SLUS-20685..APE_ESCAPE_2` -> `SLUS_206.85`
     $trimmed = $partitionName.Substring(3)  # Remove `PP.`
     $parts = $trimmed -split '\.\.'         # Split into `SLUS-20685` and `APE_ESCAPE_2*`
-    $titleIdParts = $titleId -split '-'     # Split title ID into `SLUS` and `20685`
+    $titleIdParts = $parts[0] -split '-'     # Split title ID into `SLUS` and `20685`
     $titleId = $titleIdParts[0] + "_" + $titleIdParts[1].Insert(3, ".")  # e.g. `SLUS_206.85`
     [PSCustomObject]@{
         GameName = $parts[1]

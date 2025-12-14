@@ -161,7 +161,7 @@ function Copy-ToPfsRecursive {
     # Unmount partition
     $commands += "umount"
 
-    Invoke-PfsShell -Commands $commands
+    Invoke-PfsShell -Commands $commands > $null
 }
 
 function Get-PfsFilePaths {

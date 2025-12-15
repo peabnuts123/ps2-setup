@@ -58,6 +58,7 @@ if ($ART_ZIP_EXISTS -and -not (Test-Path $ART_ZIP_PATH)) {
 [string]$COPY_ROOT = "__copy"
 [string]$TEMP_ROOT = "__temp"
 [string]$COPY_PLACEHOLDER_FILE_NAME = "place-files-to-copy-here"
+[string]$BLANK_MEMORY_CARD_PATH = "lib\blank_memory_card.bin"
 
 # ============================================================================
 # Functions
@@ -350,16 +351,21 @@ $all_ps2_data = $all_partition_names | Where-Object { $_ -like "PP.*" } | ForEac
     # Extract and reformat Title ID
     # e.g. `PP.SLUS-20685..APE_ESCAPE_2` -> `SLUS_206.85`
     $trimmed = $partitionName.Substring(3)  # Remove `PP.`
-    $parts = $trimmed -split '\.\.'         # Split into `SLUS-20685` and `APE_ESCAPE_2*`
+    $parts = $trimmed -split '\.\.'         # Split into `SLUS-20685` and `APE_ESCAPE_2`
     $titleIdParts = $parts[0] -split '-'     # Split title ID into `SLUS` and `20685`
     $titleId = $titleIdParts[0] + "_" + $titleIdParts[1].Insert(3, ".")  # e.g. `SLUS_206.85`
     # Write-Host "  [DEBUG] Found PS2 game: $titleId ($($parts[1]))"
     [PSCustomObject]@{
-        GameName = $parts[1]
-        TitleId  = $titleId
+        TitleId = $titleId
     }
 }
 Write-Host "Found $($all_ps2_data.Count) PS2 games"
+# Read all CFG files
+Write-Host "Reading existing CFG files..."
+[string[]]$existing_cfg_files = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/CFG"
+# Read all VMC files
+Write-Host "Reading existing VMC files..."
+[string[]]$existing_vmc_files = Get-PfsFilePaths -Partition $OPL_PARTITION -Path "/VMC"
 
 # === Phase 1 - Generate missing APPS folders
 Write-Host "Generating missing APPS folders..."
@@ -387,7 +393,8 @@ boot=$($psx.FileName).ELF
         Copy-Item -Path $POPSTARTER_PATH -Destination $elfDestPath -Force
 
         Write-Host "  Created APPS folder: $($psx.FileName)"
-    } else {
+    }
+    else {
         # Write-Host "  [DEBUG] APPS folder already exists for: $($psx.FileName), skipping."
     }
 }
@@ -402,38 +409,44 @@ if ($ART_ZIP_EXISTS) {
     $art_zip_paths = Get-ZipPaths -ZipPath $ART_ZIP_PATH -Prefixes $art_zip_prefixes
 
     # Collect all PS2 and PS1 game title IDs into common array
-    $all_title_ids = @()
-    $all_title_ids += $all_ps2_data | ForEach-Object { $_.TitleId }
-    $all_title_ids += $all_psx_data | ForEach-Object { $_.TitleId }
+    $all_title_data = @()
+    $all_title_data += $all_ps2_data | ForEach-Object { [PSCustomObject]@{
+            TitleId           = $_.TitleId
+            ArtDestFilePrefix = "$($_.TitleId)"
+        } }
+    $all_title_data += $all_psx_data | ForEach-Object { [PSCustomObject]@{
+            TitleId           = $_.TitleId
+            ArtDestFilePrefix = "$($_.FileName).ELF"    # @NOTE Bug in OPL. File extension ".ELF" is considered part of the APP ART file name e.g. "SCES_015.64.Ape Escape.ELF_BG.png"
+        } }
 
     # Pick out art files from the list for each game
     $art_to_extract = @()
-    foreach ($titleId in $all_title_ids) {
+    foreach ($titleData in $all_title_data) {
         foreach ($artType in $ART_FILE_TYPES) {
             # Check if this art type for this game has any existing art
-            $existing_art_of_type = $existing_art_files | Where-Object { $_ -like "${titleId}_${artType}.*" -or $_ -like "${titleId}_${artType}_*" }
+            $existing_art_of_type = $existing_art_files | Where-Object { $_ -like "$($titleData.ArtDestFilePrefix)_${artType}.*" -or $_ -like "$($titleData.ArtDestFilePrefix)_${artType}_*" }
             # Only extract new files if no existing files
             if ($existing_art_of_type.Count -eq 0) {
                 # SCR can extract up to 2 files
                 $num_arts = ($artType -eq "SCR" ? 2 : 1)
                 # Pick a random art file of type
-                $art_paths = @(Get-RandomArtPath -ArtPaths $art_zip_paths -TitleId $titleId -ArtType $artType -Count $num_arts)
+                $art_paths = @(Get-RandomArtPath -ArtPaths $art_zip_paths -TitleId $titleData.TitleId -ArtType $artType -Count $num_arts)
 
-                # Write-Host "  [DEBUG] (${titleId}_${artType}) Matching art $($art_paths.Count) paths: $($art_paths -join ', ')"
+                # Write-Host "  [DEBUG] ($($titleData.TitleId)_${artType}) Matching art $($art_paths.Count) paths: $($art_paths -join ', ')"
 
                 # Collect chosen art paths (if exist in ART zip)
                 for ($i = 0; $i -lt $art_paths.Count; $i++) {
                     $srcPath = $art_paths[$i]
-                    # Write-Host "    [DEBUG] ${titleId}_${artType}) Selected art path: $srcPath"
+                    # Write-Host "    [DEBUG] $($titleData.TitleId)_${artType}) Selected art path: $srcPath"
                     $ext = [System.IO.Path]::GetExtension($srcPath).TrimStart('.')
                     $destFileName = if ($i -eq 0) {
                         # Most files are like "SCES_015.64_BG.jpg"
-                        "${titleId}_${artType}.$ext"
+                        "$($titleData.ArtDestFilePrefix)_${artType}.$ext"
                     }
                     else {
                         # Any art files that have more than 1 entry (i.e. just SCR)
                         # are called "SCES_015.64_SCR2.jpg" for subsequent files
-                        "${titleId}_${artType}$($i+1).$ext"
+                        "$($titleData.ArtDestFilePrefix)_${artType}$($i+1).$ext"
                     }
 
                     # Record art zip path + proper OPL name of art file
@@ -442,7 +455,8 @@ if ($ART_ZIP_EXISTS) {
                         Dest = $destFileName
                     }
                 }
-            } else {
+            }
+            else {
                 # Write-Host "  [DEBUG] ART file(s) already exist for: $($titleId)_$($artType), skipping."
             }
         }
@@ -476,7 +490,50 @@ else {
 }
 
 # === Phase 3 - Ensure PS2 games have memory card CFGs
-# @TODO
+Write-Host "Generating missing PS2 memory card CFG and VMC files..."
+foreach ($ps2 in $all_ps2_data) {
+    $vmc_file_name = "$($ps2.TitleId)_0.bin"
+    $cfg_file_name = "$($ps2.TitleId).cfg"
+    # @NOTE: Removed `Title=$($_.GameName)`
+    # @TODO unsure how to get game name from partition
+    $cfg_data = @"
+CfgVersion=8
+`$ConfigSource=1
+`$VMC_0=$($ps2.TitleId)_0
+"@
+
+    # Check for existing CFG file
+    $existing_cfg = $existing_cfg_files | Where-Object { $_ -eq $cfg_file_name }
+    if ($existing_cfg.Count -eq 0) {
+        # Create CFG file in temp folder
+        $tempCfgPath = Join-Path $TEMP_ROOT "CFG"
+        if (-not (Test-Path $tempCfgPath)) {
+            New-Item -ItemType Directory -Path $tempCfgPath -Force | Out-Null
+        }
+        $cfgFilePath = Join-Path $tempCfgPath $cfg_file_name
+        Set-Content -Path $cfgFilePath -Value $cfg_data -Encoding UTF8
+        Write-Host "  Created CFG file: $cfg_file_name"
+    }
+    else {
+        # Write-Host "  [DEBUG] CFG file already exists for: $cfg_file_name, skipping."
+    }
+
+    # Check for existing VMC file
+    $existing_vmc = $existing_vmc_files | Where-Object { $_ -eq $vmc_file_name }
+    if ($existing_vmc.Count -eq 0) {
+        # Copy blank memory card file to temp VMC folder
+        $tempVmcPath = Join-Path $TEMP_ROOT "VMC"
+        if (-not (Test-Path $tempVmcPath)) {
+            New-Item -ItemType Directory -Path $tempVmcPath -Force | Out-Null
+        }
+        $vmcFilePath = Join-Path $tempVmcPath $vmc_file_name
+        Copy-Item -Path $BLANK_MEMORY_CARD_PATH -Destination $vmcFilePath -Force
+        Write-Host "  Created VMC file: $vmc_file_name"
+    }
+    else {
+        # Write-Host "  [DEBUG] VMC file already exists for: $vmc_file_name, skipping."
+    }
+}
 
 # === Phase 4 - Copy temp folders to OPL partition
 Write-Host "Copying generated files to OPL partition..."

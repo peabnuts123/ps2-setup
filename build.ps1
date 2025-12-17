@@ -56,6 +56,7 @@ if ($ART_ZIP_EXISTS -and -not (Test-Path $ART_ZIP_PATH)) {
 [string]$PFSSHELL_PATH = "lib\pfsshell\pfsshell.exe"
 [string]$POPSTARTER_PATH = "lib\popstarter\POPSTARTER.ELF"
 [string]$COPY_ROOT = "__copy"
+[string]$COPY_POPS_ROOT = Join-Path $COPY_ROOT "POPS"
 [string]$TEMP_ROOT = "__temp"
 [string]$COPY_PLACEHOLDER_FILE_NAME = "place-files-to-copy-here"
 [string]$BLANK_MEMORY_CARD_PATH = "lib\blank_memory_card.bin"
@@ -87,13 +88,12 @@ function Get-ZipPaths {
     $zip = [System.IO.Compression.ZipFile]::OpenRead($ZipPath)
 
     try {
-        $entries = $zip.Entries |
-        Where-Object { -not $_.FullName.EndsWith('/') } |  # Skip directories
-        Where-Object {
-            $entry = $_
-            $Prefixes | Where-Object { $entry.FullName.StartsWith($_) } | Select-Object -First 1
-        } |
-        ForEach-Object { $_.FullName }
+        $entries = $zip.Entries
+            | Where-Object {
+                $entry = $_
+                $Prefixes | Where-Object { $entry.FullName.StartsWith($_) } | Select-Object -First 1
+            }
+            | ForEach-Object { $_.FullName }
 
         return $entries
     }
@@ -296,7 +296,7 @@ if (Test-Path $TEMP_ROOT) {
 # === Phase 0 - Copy any source files
 Write-Host "Copying source files to HDD..."
 # PSX .VCD files
-Copy-ToPfsRecursive -Partition $POPS_PARTITION -SourcePath "$COPY_ROOT\POPS" -DestPath "/"
+Copy-ToPfsRecursive -Partition $POPS_PARTITION -SourcePath "$COPY_POPS_ROOT" -DestPath "/"
 
 # === Phase 0.1 - Read in HDD state
 Write-Host "Reading HDD state..."
@@ -404,8 +404,8 @@ Write-Host "Populating ART files..."
 if ($ART_ZIP_EXISTS) {
     Write-Host "Scanning ART zip file..."
     # List all zip files in ART zip relating to all PS2 and PS1 games
-    $art_zip_prefixes = $all_ps2_data | ForEach-Object { "PS2/$($_.TitleId)/" }
-    $art_zip_prefixes += $all_psx_data | ForEach-Object { "PS1/$($_.TitleId)/" }
+    $art_zip_prefixes = @($all_ps2_data | ForEach-Object { "PS2/$($_.TitleId)/" })
+    $art_zip_prefixes += @($all_psx_data | ForEach-Object { "PS1/$($_.TitleId)/" })
     $art_zip_paths = Get-ZipPaths -ZipPath $ART_ZIP_PATH -Prefixes $art_zip_prefixes
 
     # Collect all PS2 and PS1 game title IDs into common array

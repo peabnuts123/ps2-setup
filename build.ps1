@@ -35,7 +35,6 @@ $config = Import-PowerShellDataFile -Path ".\config.psd1"
 
 [string]$PS2_DEVICE = Get-RequiredConfigValue -Config $config -Key "Ps2Device"
 [string]$OPL_PARTITION = Get-RequiredConfigValue -Config $config -Key "OplPartition"
-# @TODO Unused
 [string]$COMMON_PARTITION = Get-RequiredConfigValue -Config $config -Key "CommonPartition"
 [string]$POPS_PARTITION = Get-RequiredConfigValue -Config $config -Key "PopsPartition"
 [string]$ART_ZIP_PATH = Get-OptionalConfigValue -Config $config -Key "ArtZipPath" -DefaultValue ""
@@ -57,6 +56,8 @@ if ($ART_ZIP_EXISTS -and -not (Test-Path $ART_ZIP_PATH)) {
 [string]$POPSTARTER_PATH = "lib\popstarter\POPSTARTER.ELF"
 [string]$COPY_ROOT = "__copy"
 [string]$COPY_POPS_ROOT = Join-Path $COPY_ROOT "POPS"
+[string]$COPY_COMMON_ROOT = Join-Path $COPY_ROOT "__common"
+[string]$COPY_OPL_ROOT = Join-Path $COPY_ROOT "OPL"
 [string]$TEMP_ROOT = "__temp"
 [string]$COPY_PLACEHOLDER_FILE_NAME = "place-files-to-copy-here"
 [string]$BLANK_MEMORY_CARD_PATH = "lib\blank_memory_card.bin"
@@ -297,6 +298,10 @@ if (Test-Path $TEMP_ROOT) {
 Write-Host "Copying source files to HDD..."
 # PSX .VCD files
 Copy-ToPfsRecursive -Partition $POPS_PARTITION -SourcePath "$COPY_POPS_ROOT" -DestPath "/"
+# Common files
+Copy-ToPfsRecursive -Partition $COMMON_PARTITION -SourcePath "$COPY_COMMON_ROOT" -DestPath "/"
+# OPL files
+Copy-ToPfsRecursive -Partition $OPL_PARTITION -SourcePath "$COPY_OPL_ROOT" -DestPath "/"
 
 # === Phase 0.1 - Read in HDD state
 Write-Host "Reading HDD state..."

@@ -1,0 +1,1 @@
+Any files placed in this directory will be copied to the `__.POPS` partition (or other partition specified in `Config.PopsPartition`)

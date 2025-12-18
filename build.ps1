@@ -91,8 +91,13 @@ function Get-ZipPaths {
     try {
         $entries = $zip.Entries
             | Where-Object {
-                $entry = $_
-                $Prefixes | Where-Object { $entry.FullName.StartsWith($_) } | Select-Object -First 1
+                $fullName = $_.FullName
+                foreach ($prefix in $Prefixes) {
+                    if ($fullName.StartsWith($prefix)) {
+                        return $true
+                    }
+                }
+                return $false
             }
             | ForEach-Object { $_.FullName }
 
